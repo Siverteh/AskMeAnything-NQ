@@ -1,89 +1,193 @@
 import torch
 from torch.utils.data import Dataset
 from transformers import BertTokenizer
-import json
-from bs4 import BeautifulSoup
 import re
+from bs4 import BeautifulSoup
+import random
+import nltk
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 class YesNoDataset(Dataset):
-    def __init__(self, json_file, tokenizer_name='bert-base-uncased', max_length=512):
-        print("Loading dataset...")
-        with open(json_file, 'r') as f:
-            self.data = [json.loads(line.strip()) for line in f if line.strip()]
-        
-        print(f"Loaded {len(self.data)} entries.")
+    def __init__(self, data, tokenizer_name='bert-base-uncased', max_length=512, balance=False):
+        """
+        Initializes the dataset by loading and preprocessing data.
+
+        Args:
+            data (list): List of data entries.
+            tokenizer_name (str): Name of the tokenizer to use.
+            max_length (int): Maximum sequence length for the tokenizer.
+            balance (bool): Whether to balance the dataset by oversampling.
+        """
+        print(f"Processing {len(data)} entries.")
+
+        if balance:
+            data = self.balance_data(data)
 
         self.tokenizer = BertTokenizer.from_pretrained(tokenizer_name)
         self.max_length = max_length
-        self.cleaning_pattern = re.compile(r'<.*?>')  # Regex pattern to clean up HTML
+
+        # Preprocess and tokenize data upfront
+        self.inputs = []
+        self.labels = []
+
+        for entry in data:
+            question = entry['question_text']
+            # Get context
+            context = self.get_relevant_context(entry)
+            context = self.clean_text(context)
+
+            combined_input = f"{question} [SEP] {context}"
+
+            #print(combined_input)
+            #print("--------------------------------------------------------------------------")
+
+            # Tokenize combined input
+            inputs = self.tokenizer(
+                combined_input,
+                max_length=self.max_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt'
+            )
+
+            self.inputs.append({
+                'input_ids': inputs['input_ids'].squeeze(0),
+                'attention_mask': inputs['attention_mask'].squeeze(0)
+            })
+
+            label = self.vote_on_yes_no(entry['annotations'])
+            self.labels.append(torch.tensor(label, dtype=torch.long))
+
+    def balance_data(self, data):
+        """
+        Balances the dataset by oversampling the minority class.
+
+        Args:
+            data (list): List of data entries.
+
+        Returns:
+            list: Balanced list of data entries.
+        """
+        from collections import Counter
+
+        # Separate entries by label
+        yes_entries = []
+        no_entries = []
+
+        for entry in data:
+            label = self.vote_on_yes_no(entry['annotations'])
+            if label == 1:
+                yes_entries.append(entry)
+            else:
+                no_entries.append(entry)
+
+        # Determine which class is the minority
+        if len(yes_entries) > len(no_entries):
+            majority_class = yes_entries
+            minority_class = no_entries
+        else:
+            majority_class = no_entries
+            minority_class = yes_entries
+
+        # Calculate how many samples are needed to balance the classes
+        difference = len(majority_class) - len(minority_class)
+
+        # Oversample the minority class
+        minority_oversampled = minority_class.copy()
+        if difference > 0:
+            oversampled_entries = random.choices(minority_class, k=difference)
+            minority_oversampled.extend(oversampled_entries)
+
+        # Combine the balanced classes
+        balanced_data = majority_class + minority_oversampled
+        random.shuffle(balanced_data)
+
+        print(f"Balanced dataset with {len(yes_entries)} 'YES' and {len(no_entries)} 'NO' entries.")
+        print(f"After balancing, each class has {len(minority_oversampled)} entries.")
+
+        return balanced_data
+
+    def __len__(self):
+        return len(self.inputs)
+
+    def __getitem__(self, idx):
+        return {
+            'input_ids': self.inputs[idx]['input_ids'],
+            'attention_mask': self.inputs[idx]['attention_mask'],
+            'label': self.labels[idx]
+        }
 
     def clean_text(self, text):
+        """
+        Cleans the input text by removing HTML tags and unnecessary whitespace.
+
+        Args:
+            text (str): The text to clean.
+
+        Returns:
+            str: The cleaned text.
+        """
         # Remove HTML tags using BeautifulSoup
         text = BeautifulSoup(text, "html.parser").get_text(separator=" ")
 
-        # Remove Wikipedia-specific phrases and meta information
-        text = re.sub(r'jump\s*to\s*:\s*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\b(navigation|search|see also|this article is about|for other uses|edit)\b', '', text, flags=re.IGNORECASE)
-        
-        # Remove metadata-related keywords (refining to remove production details, names, etc.)
-        text = re.sub(r'\b(executive producer|running time|company|release date|no\. of episodes|original release|website|production|chronology|external links)\b', '', text, flags=re.IGNORECASE)
+        # Remove extra whitespace and lowercase
+        text = re.sub(r'\s+', ' ', text).strip().lower()
 
-        # Remove disambiguation phrases
-        text = re.sub(r'for .*? see .*?\.', '', text, flags=re.IGNORECASE)
+        return text
 
-        # Remove parentheses and brackets with content inside
-        text = re.sub(r'\(.*?\)', '', text)
-        text = re.sub(r'\[.*?\]', '', text)
+    def get_relevant_context(self, entry, top_n=5):
+        """
+        Extracts the most relevant context for the question using TF-IDF similarity.
 
-        # Normalize punctuation and remove extra spaces
-        text = re.sub(r'[\'`]+', '', text)
-        text = re.sub(r'\s+', ' ', text)
+        Args:
+            entry (dict): A single data entry containing the document and annotations.
+            top_n (int): Number of top sentences to include as context.
 
-        # Split text into sentences
-        sentences = text.split('.')
-
-        # Filter and prioritize meaningful sentences
-        cleaned_sentences = [s for s in sentences if len(s) > 5]
-
-        # Keep only the first few meaningful sentences (2-3 sentences should suffice)
-        cleaned_text = '. '.join(cleaned_sentences[:5])
-
-        return text.strip().lower()
-
-
-
-    def vote_on_yes_no(self, annotations):
-        # Determine label based on majority vote
-        yes_count = sum(1 for ann in annotations if ann['yes_no_answer'] == 'YES')
-        no_count = sum(1 for ann in annotations if ann['yes_no_answer'] == 'NO')
-        return 1 if yes_count > no_count else 0
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        entry = self.data[idx]
+        Returns:
+            str: The extracted context text.
+        """
+        nltk.download('punkt', quiet=True)
 
         question = entry['question_text']
-        document = self.clean_text(entry['document_text'])
+        document = entry['document_text']
+        sentences = nltk.sent_tokenize(document)
 
-        # Combine question and document
-        combined_input = f"{question} [SEP] {document}"
+        # If the document is too short, return it as is
+        if len(sentences) <= top_n:
+            return ' '.join(sentences)
 
-        # Tokenize
-        inputs = self.tokenizer(
-            combined_input,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
+        # Compute TF-IDF scores
+        vectorizer = TfidfVectorizer().fit([question] + sentences)
+        question_vec = vectorizer.transform([question])
+        sentence_vecs = vectorizer.transform(sentences)
 
-        # Get label
-        label = self.vote_on_yes_no(entry['annotations'])
+        # Compute cosine similarity
+        similarities = cosine_similarity(question_vec, sentence_vecs).flatten()
 
-        return {
-            'input_ids': inputs['input_ids'].squeeze(0),
-            'attention_mask': inputs['attention_mask'].squeeze(0),
-            'label': torch.tensor(label, dtype=torch.long)
-        }
+        # Select top N sentences
+        top_indices = similarities.argsort()[-top_n:]
+        top_sentences = [sentences[i] for i in top_indices]
+
+        # Combine top sentences as context
+        context = ' '.join(top_sentences)
+        return context
+
+    def vote_on_yes_no(self, annotations):
+        """
+        Determines the label based on the majority vote of the annotations.
+
+        Args:
+            annotations (list): List of annotation dictionaries.
+
+        Returns:
+            int: 1 for 'YES', 0 for 'NO'.
+        """
+        yes_count = sum(1 for ann in annotations if ann['yes_no_answer'] == 'YES')
+        no_count = sum(1 for ann in annotations if ann['yes_no_answer'] == 'NO')
+
+        # If tie or no votes, default to 'NO'
+        if yes_count > no_count:
+            return 1  # 'YES'
+        else:
+            return 0  # 'NO'
