@@ -18,7 +18,6 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split, cross_val_score
 import matplotlib.pyplot as plt
 
-# Ensure necessary NLTK data is downloaded
 nltk.download('punkt', quiet=True)
 nltk.download('stopwords', quiet=True)
 
@@ -32,10 +31,8 @@ def clean_text(text):
     Returns:
         str: The cleaned text.
     """
-    # Remove HTML tags using BeautifulSoup
     text = BeautifulSoup(text, "html.parser").get_text(separator=" ")
 
-    # Remove extra whitespace and lowercase
     text = re.sub(r'\s+', ' ', text).strip().lower()
 
     return text
@@ -54,29 +51,23 @@ def get_relevant_context(entry):
     document = entry['document_text']
     sentences = nltk.sent_tokenize(document)
 
-    # If the document is too short, return it as is
     if len(sentences) <= 3:
         context = ' '.join(sentences)
         return context
 
-    # Compute TF-IDF scores
     vectorizer = TfidfVectorizer(stop_words='english').fit([question] + sentences)
     question_vec = vectorizer.transform([question])
     sentence_vecs = vectorizer.transform(sentences)
 
-    # Compute cosine similarity
     from sklearn.metrics.pairwise import cosine_similarity
     similarities = cosine_similarity(question_vec, sentence_vecs).flatten()
 
-    # Select top N sentences
     top_n = 3
     top_indices = similarities.argsort()[-top_n:]
     top_sentences = [sentences[i] for i in top_indices]
 
-    # Remove duplicates
     top_sentences = list(dict.fromkeys(top_sentences))
 
-    # Combine top sentences as context
     context = ' '.join(top_sentences)
     return context
 
@@ -93,11 +84,10 @@ def vote_on_yes_no(annotations):
     yes_count = sum(1 for ann in annotations if ann['yes_no_answer'] == 'YES')
     no_count = sum(1 for ann in annotations if ann['yes_no_answer'] == 'NO')
 
-    # If tie or no votes, default to 'NO'
     if yes_count > no_count:
-        return 1  # 'YES'
+        return 1  
     else:
-        return 0  # 'NO'
+        return 0 
 
 def load_and_preprocess_data(data_file):
     """
@@ -109,13 +99,11 @@ def load_and_preprocess_data(data_file):
     Returns:
         DataFrame: A pandas DataFrame containing preprocessed data.
     """
-    # Load data
     with open(data_file, 'r') as f:
         raw_data = [json.loads(line.strip()) for line in f if line.strip()]
 
     print(f"Loaded {len(raw_data)} entries.")
 
-    # Preprocess data
     data = []
     for entry in raw_data:
         question = entry['question_text']
@@ -140,16 +128,13 @@ def train_and_evaluate(df):
     Args:
         df (DataFrame): The preprocessed data.
     """
-    # Split data into features and labels
     X = df['text']
     y = df['label']
 
-    # Split into training and test sets
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.15, random_state=42, stratify=y
     )
 
-    # Vectorize text data using TF-IDF
     vectorizer = TfidfVectorizer(
         max_features=5000,
         ngram_range=(1, 2),
@@ -159,7 +144,6 @@ def train_and_evaluate(df):
     X_train_tfidf = vectorizer.fit_transform(X_train)
     X_test_tfidf = vectorizer.transform(X_test)
 
-    # Train logistic regression model
     model = LogisticRegression(
         solver='liblinear',
         class_weight='balanced',
@@ -168,7 +152,6 @@ def train_and_evaluate(df):
 
     model.fit(X_train_tfidf, y_train)
 
-    # Evaluate the model
     y_pred = model.predict(X_test_tfidf)
 
     accuracy = accuracy_score(y_test, y_pred)
@@ -182,18 +165,15 @@ def train_and_evaluate(df):
     print(f"Recall:    {recall:.4f}")
     print(f"F1-Score:  {f1:.4f}\n")
 
-    # Detailed classification report
     print("Classification Report:")
     print(classification_report(y_test, y_pred, target_names=['NO', 'YES']))
 
-    # Confusion matrix
     cm = confusion_matrix(y_test, y_pred)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['NO', 'YES'])
     disp.plot()
     plt.title("Confusion Matrix")
     plt.show()
 
-    # Cross-validation scores
     cv_scores = cross_val_score(model, vectorizer.transform(X), y, cv=5, scoring='accuracy')
     print(f"Cross-Validation Accuracy Scores: {cv_scores}")
     print(f"Mean CV Accuracy: {cv_scores.mean():.4f}")

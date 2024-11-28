@@ -8,7 +8,7 @@ WORKDIR /workspace
 COPY . /workspace
 
 # Install any additional dependencies required by your project
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r .devcontainer/requirements.txt
 
 # Expose port 8000 (or whatever port your application uses)
 EXPOSE 8000
